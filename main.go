@@ -168,6 +168,7 @@ func processMasterNode(ctx context.Context, masterAddr string, config Config) (i
 		if len(keys) > 0 {
 			if config.DryRun {
 				fmt.Printf("  Would delete %d keys: %v\n", len(keys), keys)
+				totalDeleted += len(keys)
 			} else {
 				// Delete keys in batches
 				deleted, err := deleteKeys(ctx, client, keys)
