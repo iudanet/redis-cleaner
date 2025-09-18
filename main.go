@@ -76,28 +76,38 @@ func run(config Config) error {
 	fmt.Printf("Batch size: %d\n", config.BatchSize)
 	fmt.Println("---")
 
-	// Get all master nodes
-	masters, err := getMasterNodes(ctx, rdb)
-	if err != nil {
-		return fmt.Errorf("failed to get master nodes: %w", err)
-	}
-
-	fmt.Printf("Found %d master nodes:\n", len(masters))
-	for _, master := range masters {
-		fmt.Printf("  - %s\n", master)
-	}
-	fmt.Println("---")
-
 	totalDeleted := 0
 	startTime := time.Now()
 
-	// Process each master node
-	for _, masterAddr := range masters {
-		deleted, err := processMasterNode(ctx, masterAddr, config)
+	// Используем ClusterClient для сканирования и удаления
+	var cursor uint64
+	var keys []string
+
+	for {
+		var err error
+		keys, cursor, err = rdb.Scan(ctx, cursor, config.KeyPattern, int64(config.BatchSize)).Result()
 		if err != nil {
-			return fmt.Errorf("failed to process master node %s: %w", masterAddr, err)
+			return fmt.Errorf("scan failed: %w", err)
 		}
-		totalDeleted += deleted
+
+		if len(keys) > 0 {
+			if config.DryRun {
+				fmt.Printf("Would delete %d keys: %v\n", len(keys), keys)
+				totalDeleted += len(keys)
+			} else {
+				// Удаляем ключи через ClusterClient
+				deleted, err := deleteKeysCluster(ctx, rdb, keys)
+				if err != nil {
+					return fmt.Errorf("delete failed: %w", err)
+				}
+				fmt.Printf("Deleted %d keys\n", deleted)
+				totalDeleted += deleted
+			}
+		}
+
+		if cursor == 0 {
+			break
+		}
 	}
 
 	duration := time.Since(startTime)
@@ -112,85 +122,9 @@ func run(config Config) error {
 	return nil
 }
 
-func getMasterNodes(ctx context.Context, rdb *redis.ClusterClient) ([]string, error) {
-	// Get cluster info to find master nodes
-	clusterInfo, err := rdb.ClusterNodes(ctx).Result()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get cluster nodes: %w", err)
-	}
-
-	var masters []string
-	lines := strings.Split(clusterInfo, "\n")
-
-	for _, line := range lines {
-		if strings.Contains(line, "master") && !strings.Contains(line, "myself,master") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				addr := strings.Split(parts[1], "@")[0] // Remove @busport part
-				masters = append(masters, addr)
-			}
-		}
-	}
-
-	if len(masters) == 0 {
-		// Fallback: if no masters found, use the provided addresses
-		return rdb.Options().Addrs, nil
-	}
-
-	return masters, nil
-}
-
-func processMasterNode(ctx context.Context, masterAddr string, config Config) (int, error) {
-	// Create client for specific master node
-	client := redis.NewClient(&redis.Options{
-		Addr: masterAddr,
-	})
-	defer client.Close()
-
-	// Test connection to master
-	if err := client.Ping(ctx).Err(); err != nil {
-		return 0, fmt.Errorf("failed to connect to master %s: %w", masterAddr, err)
-	}
-
-	fmt.Printf("Processing master node: %s\n", masterAddr)
-
-	var cursor uint64
-	var keys []string
-	totalDeleted := 0
-
-	for {
-		var err error
-		keys, cursor, err = client.Scan(ctx, cursor, config.KeyPattern, int64(config.BatchSize)).Result()
-		if err != nil {
-			return totalDeleted, fmt.Errorf("scan failed: %w", err)
-		}
-
-		if len(keys) > 0 {
-			if config.DryRun {
-				fmt.Printf("  Would delete %d keys: %v\n", len(keys), keys)
-				totalDeleted += len(keys)
-			} else {
-				// Delete keys in batches
-				deleted, err := deleteKeys(ctx, client, keys)
-				if err != nil {
-					return totalDeleted, fmt.Errorf("delete failed: %w", err)
-				}
-				fmt.Printf("  Deleted %d keys from %s\n", deleted, masterAddr)
-				totalDeleted += deleted
-			}
-		}
-
-		if cursor == 0 {
-			break
-		}
-	}
-
-	return totalDeleted, nil
-}
-
-func deleteKeys(ctx context.Context, client *redis.Client, keys []string) (int, error) {
-	// Use pipeline for batch deletion
-	pipe := client.Pipeline()
+func deleteKeysCluster(ctx context.Context, rdb *redis.ClusterClient, keys []string) (int, error) {
+	// Используем pipeline для пакетного удаления через ClusterClient
+	pipe := rdb.Pipeline()
 
 	for _, key := range keys {
 		pipe.Del(ctx, key)
@@ -209,5 +143,18 @@ func deleteKeys(ctx context.Context, client *redis.Client, keys []string) (int, 
 		deleted++
 	}
 
+	return deleted, nil
+}
+
+// Альтернативный вариант: удаление ключей по одному (медленнее, но проще)
+func deleteKeysClusterOneByOne(ctx context.Context, rdb *redis.ClusterClient, keys []string) (int, error) {
+	deleted := 0
+	for _, key := range keys {
+		err := rdb.Del(ctx, key).Err()
+		if err != nil && err != redis.Nil {
+			return deleted, fmt.Errorf("failed to delete key %s: %w", key, err)
+		}
+		deleted++
+	}
 	return deleted, nil
 }
