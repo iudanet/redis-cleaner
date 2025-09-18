@@ -131,25 +131,45 @@ func run(config Config) error {
 }
 
 func getMasterNodes(ctx context.Context, rdb *redis.ClusterClient) ([]string, error) {
-	// Получаем информацию о слотах кластера
-	clusterSlots, err := rdb.ClusterSlots(ctx).Result()
+	// Используем встроенный метод для получения информации о кластере
+	clusterInfo, err := rdb.ClusterNodes(ctx).Result()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get cluster slots: %w", err)
-	}
-
-	masterAddrs := make(map[string]bool)
-
-	for _, slot := range clusterSlots {
-		if len(slot.Nodes) > 0 {
-			master := slot.Nodes[0]
-			addr := fmt.Sprintf("%s:%d", master.Addr, master.Port)
-			masterAddrs[addr] = true
-		}
+		return nil, fmt.Errorf("failed to get cluster nodes: %w", err)
 	}
 
 	var masters []string
-	for addr := range masterAddrs {
-		masters = append(masters, addr)
+	lines := strings.Split(clusterInfo, "\n")
+
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) < 8 {
+			continue
+		}
+
+		// Проверяем, что это мастер-узел (не реплика)
+		flags := parts[2]
+		if strings.Contains(flags, "master") && !strings.Contains(flags, "fail") {
+			// Извлекаем адрес (формат: host:port@busport)
+			addrPart := parts[1]
+			addr := strings.Split(addrPart, "@")[0] // Убираем часть после @
+
+			// Проверяем, что адрес не дублируется
+			found := false
+			for _, existing := range masters {
+				if existing == addr {
+					found = true
+					break
+				}
+			}
+
+			if !found {
+				masters = append(masters, addr)
+			}
+		}
 	}
 
 	if len(masters) == 0 {
