@@ -108,7 +108,7 @@ func run(config Config) error {
 
 	if config.DryRun {
 		if totalKeys > 0 {
-			fmt.Printf("Keys that would be deleted: %v\n", allKeys)
+			fmt.Printf("Keys that would be deleted %d: %v\n", totalKeys, allKeys[:10])
 		}
 	} else {
 		// Удаляем все ключи через ClusterClient
